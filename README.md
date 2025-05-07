@@ -65,7 +65,7 @@ A lightweight Chrome extension that injects a draggable, dark-themed risk-manage
 
 ```bash
 # Clone the repository
-git clone https://github.com/<your-username>/TradeManager.git
+git clone https://github.com/fabkern/TradeManager.git
 cd TradeManager
 
 # Install dependencies
