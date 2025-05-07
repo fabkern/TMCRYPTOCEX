@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>TradeManager Settings</title>
+</head>
+<body>
+  <h1>TradeManager Settings</h1>
+
+  <label>Master Passphrase:<br>
+    <input id="pass" type="password" autocomplete="new-password">
+  </label><br><br>
+
+  <label>Binance Key:<br>
+    <input id="binKey" type="text" autocomplete="off">
+  </label><br>
+  <label>Binance Secret:<br>
+    <input id="binSec" type="text" autocomplete="off">
+  </label><br>
+
+  <label>Bybit Key:<br>
+    <input id="byKey" type="text" autocomplete="off">
+  </label><br>
+  <label>Bybit Secret:<br>
+    <input id="bySec" type="text" autocomplete="off">
+  </label><br><br>
+
+  <button id="save">Save Encrypted</button>
+
+  <!-- load as a module so we can `import` -->
+  <script type="module" src="./options.js"></script>
+</body>
+</html>
