@@ -9,13 +9,21 @@
   const slInput     = document.getElementById('rm-sl');
   const tpInput     = document.getElementById('rm-tp');
   const sizeVal     = document.getElementById('rm-size-val');
+  const rrVal       = document.getElementById('rm-rr');  // Make sure we reference the RR element
+  const feeVal      = document.getElementById('rm-fee-val');  // Reference to fee display element
   const buyBtn      = document.getElementById('rm-buy');
   const sellBtn     = document.getElementById('rm-sell');
   let entryPrice = null, balance = null;
 
   // 1) Recalculate position size
   function recalc() {
-    if (entryPrice == null || !slInput.value) return;
+    // Size calculation
+    if (entryPrice == null || !slInput.value) {
+      sizeVal.innerText = '--';
+      if (feeVal) feeVal.innerText = '--';  // Check if fee element exists
+      return;
+    }
+
     const mode    = modes.find(i => i.checked).value;
     const riskVal = parseFloat(riskInput.value) || 0;
     const riskAmt = mode === 'fixed'
@@ -23,11 +31,35 @@
       : (balance || 0) * (riskVal / 100);
     const sl  = parseFloat(slInput.value);
     const diff = Math.abs(entryPrice - sl);
+
     if (!riskAmt || !diff) {
       sizeVal.innerText = '--';
+      if (feeVal) feeVal.innerText = '--';
       return;
     }
-    sizeVal.innerText = (riskAmt / diff).toFixed(4);
+
+    const size = riskAmt / diff;
+    sizeVal.innerText = size.toFixed(4);
+
+    // RR calculation
+    const tp = parseFloat(tpInput.value);
+    if (tp && rrVal) {
+      const rr = Math.abs(tp - entryPrice) / Math.abs(entryPrice - sl);
+      rrVal.innerText = `1:${rr.toFixed(2)}`;
+    } else if (rrVal) {
+      rrVal.innerText = '--';
+    }
+
+    // Fee calculation - only if the element exists
+    if (feeVal) {
+      const totalValue = size * entryPrice;
+      // Determine exchange from URL
+      const isOnBinance = location.hostname.includes('binance');
+      const isOnBybit = location.hostname.includes('bybit');
+      const feeRate = isOnBinance ? 0.0500 : isOnBybit ? 0.0550 : 0.0500; // Default to Binance rate
+      const totalFee = totalValue * feeRate * 2 / 100; // multiply by 2 for in and out
+      feeVal.innerText = totalFee.toFixed(4);
+    }
   }
 
   // 2) Handlers for incoming data
