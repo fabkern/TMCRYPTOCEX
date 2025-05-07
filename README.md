@@ -54,9 +54,9 @@ A lightweight Chrome extension that injects a draggable, dark-themed risk-manage
 
 1. Navigate to a trading page on Binance or Bybit (spot or futures/perpetual).  
 2. The Risk Manager panel appears in the top-left by default.  
-3. Choose risk mode (`% bal` or `fixed $`), enter your risk amount.  
-4. Enter Stop-Loss and Take-Profit.  
-5. Panel updates **Size** and **RR** in real time.  
+3. Choose a risk mode (percentage of balance or fixed dollar amount) and enter your risk.  
+4. Enter your stop-loss and take-profit levels.  
+5. The panel updates **Size** and **Risk-Reward Ratio (RR)** in real time.  
 6. Click **Buy** or **Sell** to place a market order.  
 
 ---
@@ -64,10 +64,15 @@ A lightweight Chrome extension that injects a draggable, dark-themed risk-manage
 ## Development
 
 ```bash
-# Clone your own fork, install dependencies if any:
+# Clone the repository
 git clone https://github.com/<your-username>/TradeManager.git
 cd TradeManager
 
+# Install dependencies
+npm install
+
+# Start the dev server
+npm run dev
 
 
 
