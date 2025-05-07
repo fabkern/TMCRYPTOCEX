@@ -1,0 +1,12 @@
+/* content.css
+   Styles for the content-script injected panel.
+   You can add default styles here as you build out your panel.
+*/
+
+/* Prevent flash of unstyled content */
+#rm-panel {
+  opacity: 0;
+  transition: opacity 0.2s ease-in-out;
+}
+
+/* Once initialized by your content script, you can set opacity to 1 */
