@@ -306,9 +306,10 @@ async function fetchBalance (exchange){
 
           const acc = j.result.list[0];
           balance = parseFloat(
-            acc.totalAvailableBalance ??
-            acc.totalWalletBalance    ??
-            acc.totalEquity           ?? 0
+            acc.totalWalletBalance    ??  // Put this first to prioritize total balance
+            acc.totalEquity           ??  // Secondary option
+            acc.totalAvailableBalance ??  // Last option
+            0
           );
           if (!balance && Array.isArray(acc.coin)) {
             balance = acc.coin.reduce((sum,c)=>sum+parseFloat(c.walletBalance||0),0);
