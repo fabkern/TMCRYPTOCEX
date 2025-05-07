@@ -59,7 +59,7 @@ console.log('[TM] injected on', location.href);
 #tm-actions button#sell { background:#ff6b6b; }
 #tm-actions button#sell:hover { background:#ff4c4c; }
 #tm-message { margin-top:8px; font-size:12px; color:#ffcc00; text-align:center; }
-`;
+`
   const style = document.createElement('style');
   style.textContent = css;
   document.head.appendChild(style);
@@ -84,6 +84,8 @@ console.log('[TM] injected on', location.href);
         <label>Stop Loss <input id="sl" type="number"></label>
         <label>Take Profit <input id="tp" type="number"></label>
       </div>
+      <!-- Add this line after the "Size 0.9861" line -->
+      <div>Est. Fee <span id="rm-fee-val">--</span></div>
       <div id="tm-rr">RR <span id="rr">--</span></div>
       <div id="tm-size">Size <span id="size">--</span></div>
       <div id="tm-actions">
@@ -136,6 +138,7 @@ console.log('[TM] injected on', location.href);
     // Size
     if (entry == null || !sl) {
       $('#size').textContent = '--';
+      $('#rm-fee-val').textContent = '--'; // Reset fees when inputs are invalid
     } else {
       const mode = [...document.getElementsByName('mode')].find(r => r.checked).value;
       const rv   = parseFloat($('#risk').value) || 0;
@@ -143,9 +146,22 @@ console.log('[TM] injected on', location.href);
         ? rv
         : (balance || 0) * (rv / 100);
       const diff = Math.abs(entry - sl);
-      $('#size').textContent = (!riskAmt || !diff)
-        ? '--'
-        : (riskAmt / diff).toFixed(4);
+
+      // Calculate size
+      if (!riskAmt || !diff) {
+        $('#size').textContent = '--';
+        $('#rm-fee-val').textContent = '--'; // Reset fees when calculation isn't possible
+        return;
+      }
+
+      const size = riskAmt / diff;
+      $('#size').textContent = size.toFixed(4);
+
+      // Calculate fee (always update whenever size changes)
+      const totalValue = size * entry;
+      const feeRate = MK.ex === 'binance' ? 0.0500 : MK.ex === 'bybit' ? 0.0550 : 0;
+      const totalFee = totalValue * feeRate * 2 / 100; // multiply by 2 for in and out
+      $('#rm-fee-val').textContent = totalFee.toFixed(4);
     }
 
     // RR
@@ -214,12 +230,12 @@ console.log('[TM] injected on', location.href);
     if (msg.type === 'priceUpdate') {
       entry = parseFloat(msg.price);
       $('#price').textContent = msg.price;
-      calc();
+      calc(); // This will recalculate size and fees
     }
     if (msg.type === 'balanceUpdate') {
       balance = parseFloat(msg.balance);
       $('#bal').textContent = balance.toFixed(4);
-      calc();
+      calc(); // This will recalculate size and fees
     }
     if (msg.type === 'orderResult') {
       // Replace the alert with a message inside the panel
