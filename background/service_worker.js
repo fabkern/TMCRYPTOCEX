@@ -255,6 +255,84 @@ async function ensurePosIdx () {
   // The retry logic in placeBybitStopOrder will handle mismatches
 }
 
+/* ---------- Helper functions for Bybit orders ------------------------ */
+
+// Get instrument info from Bybit API
+async function getBybitInstrumentInfo(symbol, category) {
+  try {
+    const response = await fetch(
+      `https://api.bybit.com/v5/market/instruments-info?category=${category}&symbol=${symbol}`
+    );
+
+    if (!response.ok) {
+      console.warn(`[TM] Failed to get instrument info for ${symbol}: HTTP ${response.status}`);
+      return null;
+    }
+
+    const data = await response.json();
+    if (data.retCode !== 0 || !data.result?.list?.length) {
+      console.warn(`[TM] No instrument info returned for ${symbol}:`, data);
+      return null;
+    }
+
+    return data.result.list[0];
+  } catch (error) {
+    console.error(`[TM] Error fetching instrument info for ${symbol}:`, error);
+    return null;
+  }
+}
+
+// Format price according to instrument specifications
+function formatPriceForBybit(price, instrumentInfo) {
+  if (!instrumentInfo || !instrumentInfo.priceFilter || !instrumentInfo.priceFilter.tickSize) {
+    // If no instrument info, use reasonable defaults based on price range
+    if (price < 0.1) return price.toFixed(6);
+    if (price < 1) return price.toFixed(5);
+    if (price < 10) return price.toFixed(4);
+    if (price < 100) return price.toFixed(3);
+    if (price < 1000) return price.toFixed(2);
+    return price.toFixed(1);
+  }
+
+  // Calculate decimal places from tick size
+  const tickSize = parseFloat(instrumentInfo.priceFilter.tickSize);
+  const tickSizeStr = tickSize.toString();
+  const decimalPlaces = tickSizeStr.includes('.') ?
+    tickSizeStr.split('.')[1].replace(/0+$/, '').length : 0;
+
+  // Round to nearest tick size
+  const rounded = Math.round(price / tickSize) * tickSize;
+
+  // Format with correct decimal places
+  return rounded.toFixed(decimalPlaces);
+}
+
+// Check if error indicates we should try conditional order
+function isValidForConditional(retCode, retMsg) {
+  // List of error codes where conditional orders might work as fallback
+  const fallbackErrorCodes = [
+    10001, // Common error code for various parameter issues
+    110043, // Frequently related to price limits
+    110046, // Order would trigger immediately
+    110049, // Position size limit or similar
+  ];
+
+  // Also check for specific error messages
+  const fallbackErrorMessages = [
+    'price', 'too close', 'invalid', 'trigger', 'immediately',
+    'minimum', 'maximum', 'exceed', 'decimal'
+  ];
+
+  if (fallbackErrorCodes.includes(retCode)) return true;
+
+  if (retMsg) {
+    const msgLower = retMsg.toLowerCase();
+    return fallbackErrorMessages.some(term => msgLower.includes(term));
+  }
+
+  return false;
+}
+
 /* ---------- Wallet-balance fetch ------------------------------------- */
 async function fetchBalance (exchange){
   const { binanceKey, binanceSecret, bybitKey, bybitSecret } = await getKeys();
@@ -382,7 +460,7 @@ async function fetchBalance (exchange){
     }
   }
 
-  /* ---------- Place Bybit Stop Loss or Take Profit -------------------- */
+  /* ---------- Place Bybit Stop Loss or Take Profit with better asset handling -------- */
   async function placeBybitStopOrder(symbol, side, qty, stopPrice, isStopLoss) {
     const { bybitKey, bybitSecret } = await getKeys();
     if (!bybitKey || !bybitSecret) return null;
@@ -396,6 +474,18 @@ async function fetchBalance (exchange){
     if (category === 'spot') return null;
 
     try {
+      console.log(`[TM] Attempting to place ${isStopLoss ? 'SL' : 'TP'} for ${symbol} at ${stopPrice}`);
+
+      // Get instrument info to ensure proper price formatting
+      const instrumentInfo = await getBybitInstrumentInfo(symbol, category);
+      if (instrumentInfo) {
+        console.log(`[TM] Got instrument info for ${symbol}:`, instrumentInfo.priceFilter);
+      }
+
+      // Format the price according to instrument specs
+      const formattedPrice = formatPriceForBybit(stopPrice, instrumentInfo);
+      console.log(`[TM] Original price: ${stopPrice}, formatted: ${formattedPrice}`);
+
       // For futures, use explicit position index values
       const positionIdx = (side === 'BUY' ? 1 : 2); // Use 1 for long, 2 for short in hedge mode
 
@@ -407,10 +497,10 @@ async function fetchBalance (exchange){
 
       // Attach SL or TP
       if (isStopLoss) {
-        body.stopLoss = stopPrice.toString();
+        body.stopLoss = formattedPrice;
         body.slTriggerBy = 'MarkPrice';
       } else {
-        body.takeProfit = stopPrice.toString();
+        body.takeProfit = formattedPrice;
         body.tpTriggerBy = 'MarkPrice';
       }
 
@@ -439,6 +529,7 @@ async function fetchBalance (exchange){
       console.log(`[TM] Bybit ${isStopLoss ? 'SL' : 'TP'} response:`, j);
 
       if (j.retCode === 0) {
+        console.log(`[TM] Successfully placed ${isStopLoss ? 'SL' : 'TP'} for ${symbol}`);
         return `TS-${isStopLoss ? 'SL' : 'TP'}-${Date.now()}`;
       }
 
@@ -471,13 +562,84 @@ async function fetchBalance (exchange){
         if (retryJ.retCode === 0) {
           // Update cache for future orders
           cachedPosIdxBuy = cachedPosIdxSell = 0;
+          console.log(`[TM] Successfully placed ${isStopLoss ? 'SL' : 'TP'} for ${symbol} in one-way mode`);
           return `TS-${isStopLoss ? 'SL' : 'TP'}-${Date.now()}`;
         }
       }
+
+      // If all else fails, try conditional order as fallback
+      if (isValidForConditional(j.retCode, j.retMsg)) {
+        console.log(`[TM] Trying conditional order as fallback for ${symbol}`);
+        return placeBybitConditionalOrder(symbol, side, qty, formattedPrice, isStopLoss);
+      }
+
       console.error(`[TM] Failed to place ${isStopLoss ? 'Stop Loss' : 'Take Profit'} on Bybit:`, j);
       return null;
     } catch (error) {
       console.error(`[TM] Error placing ${isStopLoss ? 'SL' : 'TP'} on Bybit:`, error);
+      return null;
+    }
+  }
+
+  /* ---------- Place Bybit Conditional Order as fallback for SL/TP ------- */
+  async function placeBybitConditionalOrder(symbol, side, qty, triggerPrice, isStopLoss) {
+    const { bybitKey, bybitSecret } = await getKeys();
+    if (!bybitKey || !bybitSecret) return null;
+
+    // For futures, determine category
+    const category = currentKind === 'inverse' ? 'inverse' : 'linear';
+    if (category === 'spot') return null; // Spot doesn't support conditional orders
+
+    try {
+      // For SL/TP, we need the opposite side of the entry order
+      const orderSide = side === 'BUY' ? 'Sell' : 'Buy';
+
+      const body = {
+        category,
+        symbol,
+        side: orderSide,
+        orderType: 'Market',
+        qty: qty.toString(),
+        triggerDirection: isStopLoss ? (side === 'BUY' ? 2 : 1) : (side === 'BUY' ? 1 : 2),
+        triggerPrice: triggerPrice.toString(),
+        triggerBy: 'MarkPrice',
+        orderFilter: 'Order',
+        reduceOnly: true
+      };
+
+      // Sign using the correct format for Bybit
+      const ts = Date.now().toString();
+      const rw = '5000';
+      const btxt = JSON.stringify(body);
+      const sig = await hmac(ts + bybitKey + rw + btxt, bybitSecret);
+
+      console.log(`[TM] Sending Bybit conditional order:`, body);
+
+      const res = await fetch('https://api.bybit.com/v5/order/create', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-BAPI-API-KEY': bybitKey,
+          'X-BAPI-TIMESTAMP': ts,
+          'X-BAPI-RECV-WINDOW': rw,
+          'X-BAPI-SIGN': sig,
+          'X-BAPI-SIGN-TYPE': '2'
+        },
+        body: btxt
+      });
+
+      const j = await res.json();
+      console.log(`[TM] Bybit conditional order response:`, j);
+
+      if (j.retCode === 0) {
+        console.log(`[TM] Successfully placed conditional order for ${symbol}`);
+        return j.result?.orderId || `CO-${isStopLoss ? 'SL' : 'TP'}-${Date.now()}`;
+      }
+
+      console.error(`[TM] Failed to place conditional order on Bybit:`, j);
+      return null;
+    } catch (error) {
+      console.error(`[TM] Error placing conditional order on Bybit:`, error);
       return null;
     }
   }
@@ -686,8 +848,8 @@ async function fetchBalance (exchange){
 
         // If the order was successful and we have stop loss or take profit
         if (orderSuccess && orderId) {
-          // Wait a longer time for the order to be processed
-          await new Promise(resolve => setTimeout(resolve, 3000));
+          // Wait a longer time for the order to be processed - increased from 3000 to 5000
+          await new Promise(resolve => setTimeout(resolve, 5000));
 
           let slId, tpId;
 
