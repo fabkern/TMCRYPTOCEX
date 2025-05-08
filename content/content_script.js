@@ -24,11 +24,11 @@ console.log('[TM] injected on', location.href);
 
   let MK = detect();
 
-  // subscribe to price & fetch balance (now including exchange)
-  if (MK.sym)    chrome.runtime.sendMessage({ type:'subscribe',   symbol: MK.sym, exchange: MK.ex, kind: MK.kind });
+  // subscribe to price & fetch balance
+  if (MK.sym)    chrome.runtime.sendMessage({ type:'subscribe',   symbol: MK.sym,   exchange: MK.ex, kind: MK.kind });
   if (MK.ex)     chrome.runtime.sendMessage({ type:'getBalance', exchange: MK.ex });
 
-  /* 2. Inject CSS & build panel */
+  // 2. Inject CSS & build panel
   const css = `
 #tm { position:fixed; top:10px; left:10px; z-index:2147483647; width:300px;
   background:#2a2a2a; border-radius:8px; box-shadow:0 4px 12px rgba(0,0,0,0.5);
@@ -46,10 +46,25 @@ console.log('[TM] injected on', location.href);
   user-select:none; }
 #tm-controls input[type=number] { width:70px; margin-left:6px; padding:2px 4px;
   background:#333; border:1px solid #444; border-radius:4px; color:#eee; }
-#tm-prices div, #tm-rr, #tm-size { margin:6px 0; font-size:12px; }
-#tm-sl-tp label { display:block; margin:6px 0; font-size:12px; }
+#tm-prices div, #tm-fee, #tm-rr, #tm-size { margin:6px 0; font-size:12px; }
+#tm-sl-tp { margin:6px 0; }
+#tm-sl-tp label { display:block; font-size:12px; margin-bottom:4px; }
 #tm-sl-tp input { width:100%; padding:2px 4px; background:#333;
   border:1px solid #444; border-radius:4px; color:#eee; }
+.auto-rr-container {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin: 6px 0;
+  font-size:11px;
+  color:#aaa;
+  user-select:none;
+}
+.auto-rr-container input[type="checkbox"] { margin:0; }
+.auto-rr-container input[type="number"] {
+  width:50px; padding:2px 4px; background:#333; border:1px solid #444;
+  border-radius:4px; color:#eee; font-size:11px;
+}
 #tm-actions { text-align:center; margin-top:12px; }
 #tm-actions button { margin:0 6px; padding:6px 14px; border:none;
   border-radius:4px; color:#fff; font-size:13px; font-weight:500;
@@ -59,7 +74,7 @@ console.log('[TM] injected on', location.href);
 #tm-actions button#sell { background:#ff6b6b; }
 #tm-actions button#sell:hover { background:#ff4c4c; }
 #tm-message { margin-top:8px; font-size:12px; color:#ffcc00; text-align:center; }
-`
+`;
   const style = document.createElement('style');
   style.textContent = css;
   document.head.appendChild(style);
@@ -84,8 +99,13 @@ console.log('[TM] injected on', location.href);
         <label>Stop Loss <input id="sl" type="number"></label>
         <label>Take Profit <input id="tp" type="number"></label>
       </div>
-      <!-- Add this line after the "Size 0.9861" line -->
-      <div>Est. Fee <span id="rm-fee-val">--</span></div>
+      <div class="auto-rr-container">
+        <input type="checkbox" id="auto-rr">
+        <label for="auto-rr">Auto RR —</label>
+        <label for="rr-target">Target RR:</label>
+        <input id="rr-target" type="number" step="0.1" value="1.1">
+      </div>
+      <div id="tm-fee">Est. Fee <span id="rm-fee-val">--</span></div>
       <div id="tm-rr">RR <span id="rr">--</span></div>
       <div id="tm-size">Size <span id="size">--</span></div>
       <div id="tm-actions">
@@ -133,96 +153,103 @@ console.log('[TM] injected on', location.href);
   let entry = null, balance = null;
   function calc() {
     const sl = parseFloat($('#sl').value);
-    const tp = parseFloat($('#tp').value);
+    let tp = parseFloat($('#tp').value);
 
-    // Size
+    // Auto‐RR logic
+    const autoRR = $('#auto-rr').checked;
+    const targetRR = parseFloat($('#rr-target').value) || 1.1;
+    if (autoRR && entry != null && sl && entry !== sl) {
+      const dist = Math.abs(entry - sl);
+      const tpDist = dist * targetRR;
+      const newTp = sl < entry
+        ? entry + tpDist
+        : entry - tpDist;
+      // choose precision based on price scale
+      const precision = entry < 1 ? 6 : entry < 100 ? 4 : 2;
+      $('#tp').value = newTp.toFixed(precision);
+      $('#tp').disabled = true;
+      tp = newTp;
+    } else {
+      $('#tp').disabled = false;
+    }
+
+    // Size & Fee
     if (entry == null || !sl) {
       $('#size').textContent = '--';
-      $('#rm-fee-val').textContent = '--'; // Reset fees when inputs are invalid
+      $('#rm-fee-val').textContent = '--';
     } else {
-      const mode = [...document.getElementsByName('mode')].find(r => r.checked).value;
-      const rv   = parseFloat($('#risk').value) || 0;
+      const mode = [...document.getElementsByName('mode')]
+        .find(r => r.checked).value;
+      const rv = parseFloat($('#risk').value) || 0;
       const riskAmt = mode === 'fixed'
         ? rv
         : (balance || 0) * (rv / 100);
       const diff = Math.abs(entry - sl);
-
-      // Calculate size
       if (!riskAmt || !diff) {
         $('#size').textContent = '--';
-        $('#rm-fee-val').textContent = '--'; // Reset fees when calculation isn't possible
-        return;
+        $('#rm-fee-val').textContent = '--';
+      } else {
+        const size = riskAmt / diff;
+        $('#size').textContent = size.toFixed(4);
+        // fee estimate: maker+taker ~ 0.05% each side
+        const feeRate = MK.ex === 'binance' ? 0.05 : MK.ex === 'bybit' ? 0.055 : 0;
+        const totalFee = (size * entry) * (feeRate/100) * 2;
+        $('#rm-fee-val').textContent = totalFee.toFixed(4);
       }
-
-      const size = riskAmt / diff;
-      $('#size').textContent = size.toFixed(4);
-
-      // Calculate fee (always update whenever size changes)
-      const totalValue = size * entry;
-      const feeRate = MK.ex === 'binance' ? 0.0500 : MK.ex === 'bybit' ? 0.0550 : 0;
-      const totalFee = totalValue * feeRate * 2 / 100; // multiply by 2 for in and out
-      $('#rm-fee-val').textContent = totalFee.toFixed(4);
     }
 
-    // RR
+    // RR display
     if (entry == null || !sl || !tp || entry === sl) {
       $('#rr').textContent = '--';
     } else {
-      const rr = Math.abs(tp - entry) / Math.abs(entry - sl);
-      $('#rr').textContent = `1:${rr.toFixed(2)}`;
+      const rrv = Math.abs(tp - entry) / Math.abs(entry - sl);
+      $('#rr').textContent = `1:${rrv.toFixed(2)}`;
     }
   }
-  ['risk','sl','tp'].forEach(id => $('#'+id).oninput = calc);
+  ['risk','sl','tp','#rr-target'].forEach(id => {
+    if (id.startsWith('#')) document.querySelector(id).oninput = calc;
+    else $('#'+id).oninput = calc;
+  });
   document.getElementsByName('mode').forEach(r => r.onchange = calc);
+  $('#auto-rr').onchange = calc;
 
   /* 6. Buttons & messaging */
   $('#buy').onclick = () => {
-    console.log('[TM] buy clicked:', MK.sym, 'size=', $('#size').textContent);
-    // Get stop loss and take profit values
-    const sl = parseFloat($('#sl').value);
-    const tp = parseFloat($('#tp').value);
-
-    // Display a message if the parameters aren't valid
-    if (isNaN(parseFloat($('#size').textContent)) || parseFloat($('#size').textContent) <= 0) {
+    const size = parseFloat($('#size').textContent) || 0;
+    const sl   = parseFloat($('#sl').value) || null;
+    const tp   = parseFloat($('#tp').value) || null;
+    if (size <= 0) {
       $('#tm-message').textContent = 'Please set valid size';
       return;
     }
-
-    $('#tm-message').textContent = 'Sending order...';
-
+    $('#tm-message').textContent = 'Sending order…';
     chrome.runtime.sendMessage({
       type: 'placeOrder',
       side: 'BUY',
-      size: parseFloat($('#size').textContent) || 0,
+      size,
       symbol: MK.sym,
       exchange: MK.ex,
-      stopLoss: sl && !isNaN(sl) ? sl : null,
-      takeProfit: tp && !isNaN(tp) ? tp : null
+      stopLoss: sl,
+      takeProfit: tp
     });
   };
-
   $('#sell').onclick = () => {
-    console.log('[TM] sell clicked:', MK.sym, 'size=', $('#size').textContent);
-    // Get stop loss and take profit values
-    const sl = parseFloat($('#sl').value);
-    const tp = parseFloat($('#tp').value);
-
-    // Display a message if the parameters aren't valid
-    if (isNaN(parseFloat($('#size').textContent)) || parseFloat($('#size').textContent) <= 0) {
+    const size = parseFloat($('#size').textContent) || 0;
+    const sl   = parseFloat($('#sl').value) || null;
+    const tp   = parseFloat($('#tp').value) || null;
+    if (size <= 0) {
       $('#tm-message').textContent = 'Please set valid size';
       return;
     }
-
-    $('#tm-message').textContent = 'Sending order...';
-
+    $('#tm-message').textContent = 'Sending order…';
     chrome.runtime.sendMessage({
       type: 'placeOrder',
       side: 'SELL',
-      size: parseFloat($('#size').textContent) || 0,
+      size,
       symbol: MK.sym,
       exchange: MK.ex,
-      stopLoss: sl && !isNaN(sl) ? sl : null,
-      takeProfit: tp && !isNaN(tp) ? tp : null
+      stopLoss: sl,
+      takeProfit: tp
     });
   };
 
@@ -230,17 +257,15 @@ console.log('[TM] injected on', location.href);
     if (msg.type === 'priceUpdate') {
       entry = parseFloat(msg.price);
       $('#price').textContent = msg.price;
-      calc(); // This will recalculate size and fees
+      calc();
     }
     if (msg.type === 'balanceUpdate') {
       balance = parseFloat(msg.balance);
       $('#bal').textContent = balance.toFixed(4);
-      calc(); // This will recalculate size and fees
+      calc();
     }
     if (msg.type === 'orderResult') {
-      // Replace the alert with a message inside the panel
-      $('#tm-message').textContent = (msg.success ? '✓ ' : '✗ ') + (msg.info || '');
-
+      $('#tm-message').textContent = (msg.success ? '✓ ' : '✗ ') + (msg.info||'');
       if (msg.success && MK.ex) {
         chrome.runtime.sendMessage({ type:'getBalance', exchange: MK.ex });
       }
@@ -249,9 +274,7 @@ console.log('[TM] injected on', location.href);
 
   /* 7. Auto-refresh balance every 30s */
   setInterval(() => {
-    if (MK.ex) {
-      chrome.runtime.sendMessage({ type:'getBalance', exchange: MK.ex });
-    }
+    if (MK.ex) chrome.runtime.sendMessage({ type:'getBalance', exchange: MK.ex });
   }, 30000);
 
   /* 8. Live price feeds & SPA nav */
@@ -264,8 +287,8 @@ console.log('[TM] injected on', location.href);
 
   function startBinanceWS() {
     if (bWS) bWS.close();
-    if (MK.ex !== 'binance' || !MK.sym) return;
-    const base = MK.kind === 'usdm'
+    if (MK.ex!=='binance' || !MK.sym) return;
+    const base = MK.kind==='usdm'
       ? 'wss://fstream.binance.com/ws'
       : 'wss://stream.binance.com:9443/ws';
     bWS = new WebSocket(`${base}/${MK.sym.toLowerCase()}@trade`);
@@ -275,10 +298,10 @@ console.log('[TM] injected on', location.href);
   function startBybitWS() {
     if (byWS) byWS.close();
     clearTimeout(retry);
-    if (MK.ex !== 'bybit' || !MK.sym) return;
-    const base = MK.kind === 'spot'
+    if (MK.ex!=='bybit' || !MK.sym) return;
+    const base = MK.kind==='spot'
       ? 'wss://stream.bybit.com/v5/public/spot'
-      : MK.kind === 'linear'
+      : MK.kind==='linear'
         ? 'wss://stream.bybit.com/v5/public/linear'
         : 'wss://stream.bybit.com/v5/public/inverse';
     byWS = new WebSocket(base);
@@ -304,13 +327,13 @@ console.log('[TM] injected on', location.href);
     if (el) {
       const r0 = el.textContent.trim().replace(/,/g,'');
       if (r0) tick(r0);
-      domObs = new MutationObserver(()=> {
+      domObs = new MutationObserver(()=>{
         const r = el.textContent.trim().replace(/,/g,'');
         if (r && parseFloat(r)!==entry) tick(r);
       });
-      domObs.observe(el,{ childList:true, characterData:true, subtree:true });
+      domObs.observe(el,{childList:true,characterData:true,subtree:true});
     }
-    titlePoll = setInterval(()=> {
+    titlePoll = setInterval(()=>{
       const m = document.title.match(/(\d[\d.,]+)/);
       if (m) tick(m[1].replace(/,/g,''));
     },300);
@@ -332,7 +355,7 @@ console.log('[TM] injected on', location.href);
 
   /* 9. SPA navigation watch */
   let lastPath = location.pathname;
-  setInterval(()=> {
+  setInterval(()=>{
     if (location.pathname !== lastPath) {
       lastPath = location.pathname;
       MK = detect();
