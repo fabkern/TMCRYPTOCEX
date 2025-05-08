@@ -4,8 +4,8 @@ let ws               = null;   // Binance price socket
 let currentSymbol    = null;
 let currentExchange  = null;
 let currentKind      = null;   // 'spot' | 'linear' | 'inverse'
-let cachedPosIdxBuy  = null;   // 0 | 1
-let cachedPosIdxSell = null;   // 0 | 2
+let cachedPosIdxBuy  = 1;      // Default to 1 for hedge mode
+let cachedPosIdxSell = 2;      // Default to 2 for hedge mode
 let cachedPassphrase = null;   // Store passphrase in memory during session
 let pendingRequests  = [];     // Queue for pending requests that need keys
 
@@ -241,22 +241,18 @@ async function getBinanceSymbolInfo(symbol) {
 
 /* ---------- Probe Bybit position-mode once per session ------------- */
 async function ensurePosIdx () {
-  // For Bybit, we're going to default to NOT sending positionIdx at all
-  // This seems to work in both hedge and one-way modes
-  cachedPosIdxBuy = cachedPosIdxSell = null;
-
-  const { bybitKey, bybitSecret } = await getKeys();
-  if (!bybitKey || !bybitSecret) {
-    return; // No credentials, we'll use null
-  }
+  // Using fixed position indices - 1 for long, 2 for short in hedge mode
+  // Do not try to detect mode - it causes issues
+  cachedPosIdxBuy = 1;
+  cachedPosIdxSell = 2;
 
   // For spot, we don't need to check position mode
   if (currentKind === 'spot') {
     return;
   }
 
-  // We won't try to determine position mode as it's causing issues
-  // Just use null which means don't send positionIdx at all
+  // That's it - we're not trying to query the API for position mode
+  // The retry logic in placeBybitStopOrder will handle mismatches
 }
 
 /* ---------- Wallet-balance fetch ------------------------------------- */
@@ -339,418 +335,420 @@ async function fetchBalance (exchange){
 
     broadcast({ type: 'balanceUpdate', balance });
   }
-/* ---------- Place Binance Futures Stop Loss or Take Profit ------------- */
-async function placeBinanceStopOrder(symbol, side, quantity, stopPrice, isStopLoss) {
-  const { binanceKey, binanceSecret } = await getKeys();
-  if (!binanceKey || !binanceSecret) return null;
 
-  try {
-    // Get symbol info for precision
-    const { qtyStep, precision } = await getBinanceSymbolInfo(symbol);
+  /* ---------- Place Binance Futures Stop Loss or Take Profit ------------- */
+  async function placeBinanceStopOrder(symbol, side, quantity, stopPrice, isStopLoss) {
+    const { binanceKey, binanceSecret } = await getKeys();
+    if (!binanceKey || !binanceSecret) return null;
 
-    // Round quantity to correct precision
-    let qty = quantity;
-    if (qtyStep && qtyStep > 0) {
-      qty = (Math.floor(quantity / qtyStep) * qtyStep).toFixed(precision);
-    }
+    try {
+      // Get symbol info for precision
+      const { qtyStep, precision } = await getBinanceSymbolInfo(symbol);
 
-    console.log(`[TM] Binance stop order quantity: ${quantity}, rounded to: ${qty}`);
+      // Round quantity to correct precision
+      let qty = quantity;
+      if (qtyStep && qtyStep > 0) {
+        qty = (Math.floor(quantity / qtyStep) * qtyStep).toFixed(precision);
+      }
 
-    const ts = Date.now();
-    // Determine the right parameters based on whether it's SL or TP
-    const orderType = isStopLoss ? 'STOP_MARKET' : 'TAKE_PROFIT_MARKET';
-    // For stop loss/take profit, the side is reversed from the original order
-    const stopSide = side === 'BUY' ? 'SELL' : 'BUY';
+      console.log(`[TM] Binance stop order quantity: ${quantity}, rounded to: ${qty}`);
 
-    const qs = `symbol=${symbol}&side=${stopSide}&type=${orderType}`
-            + `&quantity=${qty}&stopPrice=${stopPrice}`
-            + `&timeInForce=GTC&closePosition=true`
-            + `&timestamp=${ts}&recvWindow=5000`;
-    const sig = await hmac(qs, binanceSecret);
-    const url = `https://fapi.binance.com/fapi/v1/order?${qs}&signature=${sig}`;
+      const ts = Date.now();
+      // Determine the right parameters based on whether it's SL or TP
+      const orderType = isStopLoss ? 'STOP_MARKET' : 'TAKE_PROFIT_MARKET';
+      // For stop loss/take profit, the side is reversed from the original order
+      const stopSide = side === 'BUY' ? 'SELL' : 'BUY';
 
-    const res = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': binanceKey } });
-    const data = await res.json();
+      const qs = `symbol=${symbol}&side=${stopSide}&type=${orderType}`
+              + `&quantity=${qty}&stopPrice=${stopPrice}`
+              + `&timeInForce=GTC&closePosition=true`
+              + `&timestamp=${ts}&recvWindow=5000`;
+      const sig = await hmac(qs, binanceSecret);
+      const url = `https://fapi.binance.com/fapi/v1/order?${qs}&signature=${sig}`;
 
-    if (data.orderId) {
-      console.log(`[TM] Binance ${isStopLoss ? 'Stop Loss' : 'Take Profit'} placed:`, data);
-      return data.orderId;
-    } else {
-      console.error(`[TM] Failed to place ${isStopLoss ? 'Stop Loss' : 'Take Profit'} on Binance:`, data);
+      const res = await fetch(url, { method: 'POST', headers: { 'X-MBX-APIKEY': binanceKey } });
+      const data = await res.json();
+
+      if (data.orderId) {
+        console.log(`[TM] Binance ${isStopLoss ? 'Stop Loss' : 'Take Profit'} placed:`, data);
+        return data.orderId;
+      } else {
+        console.error(`[TM] Failed to place ${isStopLoss ? 'Stop Loss' : 'Take Profit'} on Binance:`, data);
+        return null;
+      }
+    } catch (error) {
+      console.error(`[TM] Error placing ${isStopLoss ? 'SL' : 'TP'} on Binance:`, error);
       return null;
     }
-  } catch (error) {
-    console.error(`[TM] Error placing ${isStopLoss ? 'SL' : 'TP'} on Binance:`, error);
-    return null;
   }
-}
 
-/* ---------- Place Bybit Stop Loss or Take Profit -------------------- */
-async function placeBybitStopOrder(symbol, side, qty, stopPrice, isStopLoss) {
-  const { bybitKey, bybitSecret } = await getKeys();
-  if (!bybitKey || !bybitSecret) return null;
+  /* ---------- Place Bybit Stop Loss or Take Profit -------------------- */
+  async function placeBybitStopOrder(symbol, side, qty, stopPrice, isStopLoss) {
+    const { bybitKey, bybitSecret } = await getKeys();
+    if (!bybitKey || !bybitSecret) return null;
 
-  try {
-    const category = currentKind === 'spot' ? 'spot' :
-                     currentKind === 'inverse' ? 'inverse' : 'linear';
+    // Only futures/perp support SL/TP
+    const category = currentKind === 'spot'
+      ? 'spot'
+      : currentKind === 'inverse'
+        ? 'inverse'
+        : 'linear';
+    if (category === 'spot') return null;
 
-    // For spot, we can't set SL/TP
-    if (category === 'spot') {
-      console.log('[TM] SL/TP not supported for spot markets');
-      return null;
-    }
+    try {
+      // For futures, use explicit position index values
+      const positionIdx = (side === 'BUY' ? 1 : 2); // Use 1 for long, 2 for short in hedge mode
 
-    // For futures, use the trading-stop endpoint
-    const positionIdx = (side === 'BUY' ? 1 : 2); // Use 1 for long, 2 for short in hedge mode
+      const body = {
+        category,
+        symbol,
+        positionIdx
+      };
 
-    const body = {
-      category,
-      symbol,
-      positionIdx
-    };
+      // Attach SL or TP
+      if (isStopLoss) {
+        body.stopLoss = stopPrice.toString();
+        body.slTriggerBy = 'MarkPrice';
+      } else {
+        body.takeProfit = stopPrice.toString();
+        body.tpTriggerBy = 'MarkPrice';
+      }
 
-    if (isStopLoss) {
-      body.stopLoss = stopPrice.toString();
-      body.slTriggerBy = 'MarkPrice';
-    } else {
-      body.takeProfit = stopPrice.toString();
-      body.tpTriggerBy = 'MarkPrice';
-    }
+      // Sign using the correct format for Bybit
+      const ts = Date.now().toString();
+      const rw = '5000';
+      const btxt = JSON.stringify(body);
+      const sig = await hmac(ts + bybitKey + rw + btxt, bybitSecret);
 
-    const ts = Date.now().toString();
-    const rw = '5000';
-    const btxt = JSON.stringify(body);
-    const sig = await hmac(ts + bybitKey + rw + btxt, bybitSecret);
+      console.log(`[TM] Sending Bybit ${isStopLoss ? 'Stop Loss' : 'Take Profit'}:`, body);
 
-    console.log(`[TM] Sending Bybit ${isStopLoss ? 'Stop Loss' : 'Take Profit'}:`, body);
-
-    const res = await fetch('https://api.bybit.com/v5/position/trading-stop', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-BAPI-API-KEY': bybitKey,
-        'X-BAPI-TIMESTAMP': ts,
-        'X-BAPI-RECV-WINDOW': rw,
-        'X-BAPI-SIGN': sig,
-        'X-BAPI-SIGN-TYPE': '2'
-      },
-      body: btxt
-    });
-
-    const j = await res.json();
-    console.log(`[TM] Bybit ${isStopLoss ? 'SL' : 'TP'} response:`, j);
-
-    if (j.retCode === 0) {
-      return `TS-${isStopLoss ? 'SL' : 'TP'}-${Date.now()}`;
-    }
-
-    // If position mode error, retry with positionIdx = 0 (one-way mode)
-    if (j.retCode === 10001 && j.retMsg.includes('position idx not match position mode')) {
-      console.log('[TM] Retrying with one-way mode');
-
-      body.positionIdx = 0;
-
-      const newTs = Date.now().toString();
-      const retryBtxt = JSON.stringify(body);
-      const retrySig = await hmac(newTs + bybitKey + rw + retryBtxt, bybitSecret);
-
-      const retryRes = await fetch('https://api.bybit.com/v5/position/trading-stop', {
+      const res = await fetch('https://api.bybit.com/v5/position/trading-stop', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'X-BAPI-API-KEY': bybitKey,
-          'X-BAPI-TIMESTAMP': newTs,
+          'X-BAPI-TIMESTAMP': ts,
           'X-BAPI-RECV-WINDOW': rw,
-          'X-BAPI-SIGN': retrySig,
+          'X-BAPI-SIGN': sig,
           'X-BAPI-SIGN-TYPE': '2'
         },
-        body: retryBtxt
+        body: btxt
       });
 
-      const retryJ = await retryRes.json();
-      console.log(`[TM] Bybit retry ${isStopLoss ? 'SL' : 'TP'} response:`, retryJ);
+      const j = await res.json();
+      console.log(`[TM] Bybit ${isStopLoss ? 'SL' : 'TP'} response:`, j);
 
-      if (retryJ.retCode === 0) {
-        // Update cache for future orders
-        cachedPosIdxBuy = cachedPosIdxSell = 0;
+      if (j.retCode === 0) {
         return `TS-${isStopLoss ? 'SL' : 'TP'}-${Date.now()}`;
       }
+
+      // If position mode error, retry with positionIdx = 0 (one-way mode)
+      if (j.retCode === 10001 && j.retMsg.includes('position idx not match position mode')) {
+        console.log('[TM] Retrying with one-way mode');
+
+        body.positionIdx = 0;
+
+        const newTs = Date.now().toString();
+        const retryBtxt = JSON.stringify(body);
+        const retrySig = await hmac(newTs + bybitKey + rw + retryBtxt, bybitSecret);
+
+        const retryRes = await fetch('https://api.bybit.com/v5/position/trading-stop', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-BAPI-API-KEY': bybitKey,
+            'X-BAPI-TIMESTAMP': newTs,
+            'X-BAPI-RECV-WINDOW': rw,
+            'X-BAPI-SIGN': retrySig,
+            'X-BAPI-SIGN-TYPE': '2'
+          },
+          body: retryBtxt
+        });
+
+        const retryJ = await retryRes.json();
+        console.log(`[TM] Bybit retry ${isStopLoss ? 'SL' : 'TP'} response:`, retryJ);
+
+        if (retryJ.retCode === 0) {
+          // Update cache for future orders
+          cachedPosIdxBuy = cachedPosIdxSell = 0;
+          return `TS-${isStopLoss ? 'SL' : 'TP'}-${Date.now()}`;
+        }
+      }
+      console.error(`[TM] Failed to place ${isStopLoss ? 'Stop Loss' : 'Take Profit'} on Bybit:`, j);
+      return null;
+    } catch (error) {
+      console.error(`[TM] Error placing ${isStopLoss ? 'SL' : 'TP'} on Bybit:`, error);
+      return null;
     }
-    console.error(`[TM] Failed to place ${isStopLoss ? 'Stop Loss' : 'Take Profit'} on Bybit:`, j);
-return null;
-} catch (error) {
-console.error(`[TM] Error placing ${isStopLoss ? 'SL' : 'TP'} on Bybit:`, error);
-return null;
-}
-}
-
-/* ---------- Market-order placement ---------------------------------- */
-async function placeOrder(msg) {
-// Log the full message for debugging
-console.log('[TM] placeOrder received message:', msg);
-
-const { side, size, symbol, exchange, stopLoss, takeProfit } = msg;
-console.log(`[TM] Order details: ${exchange} ${symbol} ${side} Size:${size} SL:${stopLoss} TP:${takeProfit}`);
-
-const { binanceKey, binanceSecret, bybitKey, bybitSecret } = await getKeys();
-
-/* ---- Binance Futures Market -------------------------------- */
-if (exchange === 'binance') {
-if (!binanceKey||!binanceSecret)
-  return broadcast({ type:'orderResult', success:false, info:'missing config' });
-
-try {
-  // Get symbol information to determine proper precision
-  const { qtyStep, precision } = await getBinanceSymbolInfo(symbol);
-
-  // Round the quantity according to the symbol's precision requirements
-  let qty;
-  if (qtyStep && qtyStep > 0) {
-    // Round down to the nearest step size
-    qty = (Math.floor(size / qtyStep) * qtyStep).toFixed(precision);
-  } else {
-    // Default to 0 decimals if we couldn't get the step size
-    qty = Math.floor(size).toString();
   }
 
-  console.log(`[TM] Binance order size: ${size}, rounded to: ${qty}, step: ${qtyStep}, precision: ${precision}`);
+  /* ---------- Market-order placement ---------------------------------- */
+  async function placeOrder(msg) {
+    // Log the full message for debugging
+    console.log('[TM] placeOrder received message:', msg);
 
-  const ts = Date.now();
-  const qs = `symbol=${symbol}&side=${side}&type=MARKET&quantity=${qty}`
-           + `&timestamp=${ts}&recvWindow=5000`;
-  const sig = await hmac(qs, binanceSecret);
-  const url = `https://fapi.binance.com/fapi/v1/order?${qs}&signature=${sig}`;
+    const { side, size, symbol, exchange, stopLoss, takeProfit } = msg;
+    console.log(`[TM] Order details: ${exchange} ${symbol} ${side} Size:${size} SL:${stopLoss} TP:${takeProfit}`);
 
-  const res = await fetch(url, { method:'POST', headers:{ 'X-MBX-APIKEY':binanceKey } });
-  const txt = await res.text();
-  let ok, info, orderId;
+    const { binanceKey, binanceSecret, bybitKey, bybitSecret } = await getKeys();
 
-  try {
-    const j = JSON.parse(txt);
-    ok = res.ok && !j.code;
-    orderId = j.orderId;
-    info = j.orderId ? `OrderId ${j.orderId}` : (j.msg||txt);
-  } catch {
-    ok = false;
-    info = txt.slice(0,140);
-  }
+    /* ---- Binance Futures Market -------------------------------- */
+    if (exchange === 'binance') {
+      if (!binanceKey||!binanceSecret)
+        return broadcast({ type:'orderResult', success:false, info:'missing config' });
 
-  // If the order was successful and we have stop loss or take profit
-  if (ok && orderId) {
-    let slId, tpId;
+      try {
+        // Get symbol information to determine proper precision
+        const { qtyStep, precision } = await getBinanceSymbolInfo(symbol);
 
-    // Place stop loss if provided
-    if (stopLoss && stopLoss > 0) {
-      console.log(`[TM] Placing Binance SL at ${stopLoss}`);
-      slId = await placeBinanceStopOrder(symbol, side, qty, stopLoss, true);
-      if (slId) {
-        info += `, SL: ${slId}`;
+        // Round the quantity according to the symbol's precision requirements
+        let qty;
+        if (qtyStep && qtyStep > 0) {
+          // Round down to the nearest step size
+          qty = (Math.floor(size / qtyStep) * qtyStep).toFixed(precision);
+        } else {
+          // Default to 0 decimals if we couldn't get the step size
+          qty = Math.floor(size).toString();
+        }
+
+        console.log(`[TM] Binance order size: ${size}, rounded to: ${qty}, step: ${qtyStep}, precision: ${precision}`);
+
+        const ts = Date.now();
+        const qs = `symbol=${symbol}&side=${side}&type=MARKET&quantity=${qty}`
+                 + `&timestamp=${ts}&recvWindow=5000`;
+        const sig = await hmac(qs, binanceSecret);
+        const url = `https://fapi.binance.com/fapi/v1/order?${qs}&signature=${sig}`;
+
+        const res = await fetch(url, { method:'POST', headers:{ 'X-MBX-APIKEY':binanceKey } });
+        const txt = await res.text();
+        let ok, info, orderId;
+
+        try {
+          const j = JSON.parse(txt);
+          ok = res.ok && !j.code;
+          orderId = j.orderId;
+          info = j.orderId ? `OrderId ${j.orderId}` : (j.msg||txt);
+        } catch {
+          ok = false;
+          info = txt.slice(0,140);
+        }
+
+        // If the order was successful and we have stop loss or take profit
+        if (ok && orderId) {
+          let slId, tpId;
+
+          // Place stop loss if provided
+          if (stopLoss && stopLoss > 0) {
+            console.log(`[TM] Placing Binance SL at ${stopLoss}`);
+            slId = await placeBinanceStopOrder(symbol, side, qty, stopLoss, true);
+            if (slId) {
+              info += `, SL: ${slId}`;
+            }
+          }
+
+          // Place take profit if provided
+          if (takeProfit && takeProfit > 0) {
+            console.log(`[TM] Placing Binance TP at ${takeProfit}`);
+            tpId = await placeBinanceStopOrder(symbol, side, qty, takeProfit, false);
+            if (tpId) {
+              info += `, TP: ${tpId}`;
+            }
+          }
+        }
+
+        return broadcast({ type:'orderResult', success:ok, info });
+      } catch (e) {
+        return broadcast({ type:'orderResult', success:false, info:e.message });
       }
     }
 
-    // Place take profit if provided
-    if (takeProfit && takeProfit > 0) {
-      console.log(`[TM] Placing Binance TP at ${takeProfit}`);
-      tpId = await placeBinanceStopOrder(symbol, side, qty, takeProfit, false);
-      if (tpId) {
-        info += `, TP: ${tpId}`;
+    /* ---- Bybit Unified Market ---------------------------------- */
+    if (exchange === 'bybit') {
+      if (!bybitKey||!bybitSecret)
+        return broadcast({ type:'orderResult', success:false, info:'missing config' });
+
+      try {
+        // Make sure position mode is established
+        await ensurePosIdx();
+
+        // Round size down to valid qtyStep
+        const step = await getQtyStep(symbol);
+        let qty;
+
+        if (step && step > 0) {
+          const precision = (step.toString().split('.')[1] || '').length;
+          qty = (Math.floor(size / step) * step).toFixed(precision);
+        } else {
+          // If we couldn't get the step, or it's 0, try defaults based on common patterns
+          if (size >= 1) {
+            // For larger quantities (≥1), round to integer
+            qty = Math.floor(size).toString();
+          } else {
+            // For small quantities (<1), keep original
+            qty = size.toString();
+          }
+        }
+
+        console.log(`[TM] Order size: ${size}, rounded to: ${qty}, step: ${step}`);
+
+        // Set proper category based on currentKind
+        const category = currentKind === 'spot' ? 'spot' :
+                         currentKind === 'inverse' ? 'inverse' : 'linear';
+
+        // Build the order body - use explicit positionIdx values for non-spot
+        const body = {
+          category,
+          symbol,
+          side: side === 'BUY' ? 'Buy' : 'Sell',
+          orderType: 'Market',
+          qty
+        };
+
+        // For non-spot trading, add the position index
+        if (category !== 'spot') {
+          if (side === 'BUY') {
+            body.positionIdx = 1;  // Long position in hedge mode
+          } else {
+            body.positionIdx = 2;  // Short position in hedge mode
+          }
+        }
+
+        // Sign using standard Bybit approach
+        const ts = Date.now().toString();
+        const rw = '5000';
+        const btxt = JSON.stringify(body);
+        const sig = await hmac(ts + bybitKey + rw + btxt, bybitSecret);
+
+        console.log(`[TM] Sending Bybit order:`, body);
+
+        const res = await fetch('https://api.bybit.com/v5/order/create', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-BAPI-API-KEY': bybitKey,
+            'X-BAPI-TIMESTAMP': ts,
+            'X-BAPI-RECV-WINDOW': rw,
+            'X-BAPI-SIGN': sig,
+            'X-BAPI-SIGN-TYPE': '2'
+          },
+          body: btxt
+        });
+
+        const j = await res.json();
+        console.log(`[TM] Bybit order response:`, j);
+
+        // If we get a position mode error, we need to retry with one-way mode
+        let orderSuccess = false;
+        let orderInfo = '';
+        let orderId = null;
+
+        if (j.retCode === 0) {
+          orderSuccess = true;
+          orderId = j.result?.orderId;
+          orderInfo = `OrderId ${orderId}`;
+        } else if (j.retCode === 10001 && j.retMsg.includes('position idx not match position mode')) {
+          console.log('[TM] Retrying with one-way mode (positionIdx=0)');
+
+          body.positionIdx = 0;  // One-way mode
+
+          const retryTs = Date.now().toString();
+          const retryBtxt = JSON.stringify(body);
+          const retrySig = await hmac(retryTs + bybitKey + rw + retryBtxt, bybitSecret);
+
+          const retryRes = await fetch('https://api.bybit.com/v5/order/create', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-BAPI-API-KEY': bybitKey,
+              'X-BAPI-TIMESTAMP': retryTs,
+              'X-BAPI-RECV-WINDOW': rw,
+              'X-BAPI-SIGN': retrySig,
+              'X-BAPI-SIGN-TYPE': '2'
+            },
+            body: retryBtxt
+          });
+
+          const retryJ = await retryRes.json();
+          console.log(`[TM] Bybit retry order response:`, retryJ);
+
+          orderSuccess = retryJ.retCode === 0;
+          if (orderSuccess) {
+            orderId = retryJ.result?.orderId;
+            orderInfo = `OrderId ${orderId}`;
+            // Update cache for future orders - we're in one-way mode
+            cachedPosIdxBuy = cachedPosIdxSell = 0;
+          } else {
+            orderInfo = retryJ.retMsg || JSON.stringify(retryJ);
+          }
+        } else {
+          orderInfo = j.retMsg || JSON.stringify(j);
+        }
+
+        // If the order was successful and we have stop loss or take profit
+        if (orderSuccess && orderId) {
+          // Wait a longer time for the order to be processed
+          await new Promise(resolve => setTimeout(resolve, 3000));
+
+          let slId, tpId;
+
+          // Place stop loss if provided
+          if (stopLoss && stopLoss > 0) {
+            console.log(`[TM] Placing Bybit SL at ${stopLoss}`);
+            slId = await placeBybitStopOrder(symbol, side, qty, stopLoss, true);
+            if (slId) {
+              orderInfo += `, SL: ${slId}`;
+            }
+          }
+
+          // Place take profit if provided
+          if (takeProfit && takeProfit > 0) {
+            console.log(`[TM] Placing Bybit TP at ${takeProfit}`);
+            tpId = await placeBybitStopOrder(symbol, side, qty, takeProfit, false);
+            if (tpId) {
+              orderInfo += `, TP: ${tpId}`;
+            }
+          }
+        }
+
+        return broadcast({ type: 'orderResult', success: orderSuccess, info: orderInfo });
+      } catch (e) {
+        console.error('[TM] Bybit order error:', e);
+        return broadcast({ type: 'orderResult', success: false, info: e.message });
       }
     }
+
+    broadcast({ type:'orderResult', success:false, info:'unsupported exchange' });
   }
 
-  return broadcast({ type:'orderResult', success:ok, info });
-} catch (e) {
-  return broadcast({ type:'orderResult', success:false, info:e.message });
-}
-}
 
-/* ---- Bybit Unified Market ---------------------------------- */
-if (exchange === 'bybit') {
-if (!bybitKey||!bybitSecret)
-  return broadcast({ type:'orderResult', success:false, info:'missing config' });
+  // In your message listener, add the handler for passphrase responses:
+  chrome.runtime.onMessage.addListener(msg => {
+    console.log('[TM] got message', msg);
 
-try {
-  // Make sure position mode is established
-  await ensurePosIdx();
-
-  // Round size down to valid qtyStep
-  const step = await getQtyStep(symbol);
-  let qty;
-
-  if (step && step > 0) {
-    const precision = (step.toString().split('.')[1] || '').length;
-    qty = (Math.floor(size / step) * step).toFixed(precision);
-  } else {
-    // If we couldn't get the step, or it's 0, try defaults based on common patterns
-    if (size >= 1) {
-      // For larger quantities (≥1), round to integer
-      qty = Math.floor(size).toString();
-    } else {
-      // For small quantities (<1), keep original
-      qty = size.toString();
+    if (msg.type === 'passphraseResponse') {
+      handlePassphrase(msg.passphrase);
+      return;
     }
-  }
 
-  console.log(`[TM] Order size: ${size}, rounded to: ${qty}, step: ${step}`);
+    if (msg.type === 'subscribe') {
+      // content script should now send: {type:'subscribe',symbol,exchange,kind}
+      currentSymbol = msg.symbol;
+      currentExchange = msg.exchange;
+      currentKind = msg.kind || 'linear'; // Default to linear if not specified
 
-  // Set proper category based on currentKind
-  const category = currentKind === 'spot' ? 'spot' :
-                   currentKind === 'inverse' ? 'inverse' : 'linear';
+      // Reset position idx cache when changing symbols/exchange
+      // Set default values for hedge mode
+      cachedPosIdxBuy = 1;
+      cachedPosIdxSell = 2;
 
-  // Build the order body - DO NOT include positionIdx as it causes issues
-  const body = {
-    category,
-    symbol,
-    side: side === 'BUY' ? 'Buy' : 'Sell',
-    orderType: 'Market',
-    qty
-  };
-
-  // For non-spot trading, add the correct positionIdx parameter
-  if (category !== 'spot') {
-    if (side === 'BUY') {
-      body.positionIdx = 1;  // Long position
-    } else {
-      body.positionIdx = 2;  // Short position
+      if (msg.exchange === 'binance') startPriceStream(msg.symbol);
     }
-  }
 
-  // Sign & send
-  const ts = Date.now().toString();
-  const rw = '5000';
-  const btxt = JSON.stringify(body);
-  const sig = await hmac(ts + bybitKey + rw + btxt, bybitSecret);
+    if (msg.type === 'getBalance') {
+      fetchBalance(msg.exchange);
+    }
 
-  console.log(`[TM] Sending Bybit order:`, body);
-
-  const res = await fetch('https://api.bybit.com/v5/order/create', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-BAPI-API-KEY': bybitKey,
-      'X-BAPI-TIMESTAMP': ts,
-      'X-BAPI-RECV-WINDOW': rw,
-      'X-BAPI-SIGN': sig,
-      'X-BAPI-SIGN-TYPE': '2'
-    },
-    body: btxt
+    if (msg.type === 'placeOrder') {
+      placeOrder(msg);
+    }
   });
-
-  const j = await res.json();
-  console.log(`[TM] Bybit order response:`, j);
-
-  // If we get a position mode error, we need to retry without positionIdx
-  let orderSuccess = false;
-  let orderInfo = '';
-  let orderId = null;
-
-  if (j.retCode === 0) {
-    orderSuccess = true;
-    orderId = j.result?.orderId;
-    orderInfo = `OrderId ${orderId}`;
-  } else if (j.retCode === 10001 && j.retMsg.includes('position idx not match position mode')) {
-    console.log('[TM] Retrying order with positionIdx=0 (one-way mode)');
-
-    // Try with positionIdx=0 (for one-way mode)
-    body.positionIdx = 0;
-
-    const retryTs = Date.now().toString();
-    const retryBtxt = JSON.stringify(body);
-    const retrySig = await hmac(retryTs + bybitKey + rw + retryBtxt, bybitSecret);
-
-    const retryRes = await fetch('https://api.bybit.com/v5/order/create', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'X-BAPI-API-KEY': bybitKey,
-        'X-BAPI-TIMESTAMP': retryTs,
-        'X-BAPI-RECV-WINDOW': rw,
-        'X-BAPI-SIGN': retrySig,
-        'X-BAPI-SIGN-TYPE': '2'
-      },
-      body: retryBtxt
-    });
-
-    const retryJ = await retryRes.json();
-    console.log(`[TM] Bybit retry order response:`, retryJ);
-
-    orderSuccess = retryJ.retCode === 0;
-    if (orderSuccess) {
-      orderId = retryJ.result?.orderId;
-      orderInfo = `OrderId ${orderId}`;
-      // Update cache for future orders - we now know we're in one-way mode
-      cachedPosIdxBuy = cachedPosIdxSell = 0;
-    } else {
-      orderInfo = retryJ.retMsg || JSON.stringify(retryJ);
-    }
-  } else {
-    orderInfo = j.retMsg || JSON.stringify(j);
-  }
-
-  // If the order was successful and we have stop loss or take profit
-  if (orderSuccess && orderId) {
-    // Wait a short time for the order to be processed
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    let slId, tpId;
-
-    // Place stop loss if provided
-    if (stopLoss && stopLoss > 0) {
-      console.log(`[TM] Placing Bybit SL at ${stopLoss}`);
-      slId = await placeBybitStopOrder(symbol, side, qty, stopLoss, true);
-      if (slId) {
-        orderInfo += `, SL: ${slId}`;
-      }
-    }
-
-    // Place take profit if provided
-    if (takeProfit && takeProfit > 0) {
-      console.log(`[TM] Placing Bybit TP at ${takeProfit}`);
-      tpId = await placeBybitStopOrder(symbol, side, qty, takeProfit, false);
-      if (tpId) {
-        orderInfo += `, TP: ${tpId}`;
-      }
-    }
-  }
-
-  return broadcast({ type: 'orderResult', success: orderSuccess, info: orderInfo });
-} catch (e) {
-  console.error('[TM] Bybit order error:', e);
-  return broadcast({ type: 'orderResult', success: false, info: e.message });
-}
-}
-
-broadcast({ type:'orderResult', success:false, info:'unsupported exchange' });
-}
-
-
-// In your message listener, add the handler for passphrase responses:
-chrome.runtime.onMessage.addListener(msg => {
-  console.log('[TM] got message', msg);
-
-  if (msg.type === 'passphraseResponse') {
-    handlePassphrase(msg.passphrase);
-    return;
-  }
-
-  if (msg.type === 'subscribe') {
-    // content script should now send: {type:'subscribe',symbol,exchange,kind}
-    currentSymbol = msg.symbol;
-    currentExchange = msg.exchange;
-    currentKind = msg.kind || 'linear'; // Default to linear if not specified
-
-    // Reset position idx cache when changing symbols/exchange
-    cachedPosIdxBuy = null;
-    cachedPosIdxSell = null;
-
-    if (msg.exchange === 'binance') startPriceStream(msg.symbol);
-  }
-
-  if (msg.type === 'getBalance') {
-    fetchBalance(msg.exchange);
-  }
-
-  if (msg.type === 'placeOrder') {
-    placeOrder(msg);
-  }
-});
