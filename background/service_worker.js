@@ -281,49 +281,64 @@ async function fetchBalance (exchange){
 
   /* ---- Bybit Unified ----------------------------------------- */
   if (exchange === 'bybit' && bybitKey && bybitSecret) {
-    const hosts=['https://api.bybit.com','https://api-testnet.bybit.com'];
-    const acct =['UNIFIED','SPOT','CONTRACT','FUND','OPTION'];
-    const ts   = Date.now().toString();
-    const rw   = '5000';
+      const hosts = ['https://api.bybit.com', 'https://api-testnet.bybit.com'];
+      const acct = ['UNIFIED', 'CONTRACT', 'SPOT', 'FUND', 'OPTION']; // Reordered to prioritize UNIFIED and CONTRACT
+      const ts = Date.now().toString();
+      const rw = '5000';
 
-    outer: for (const host of hosts) {
-      for (const a of acct) {
-        try {
-          const query = `accountType=${a}`;
-          const sig   = await hmac(ts+bybitKey+rw+query, bybitSecret);
-          const j     = await fetch(`${host}/v5/account/wallet-balance?${query}`, {
-            headers:{
-              'X-BAPI-API-KEY':     bybitKey,
-              'X-BAPI-TIMESTAMP':   ts,
-              'X-BAPI-RECV-WINDOW': rw,
-              'X-BAPI-SIGN':        sig,
-              'X-BAPI-SIGN-TYPE':   '2'
+      outer: for (const host of hosts) {
+        for (const a of acct) {
+          try {
+            const query = `accountType=${a}`;
+            const sig = await hmac(ts + bybitKey + rw + query, bybitSecret);
+            const j = await fetch(`${host}/v5/account/wallet-balance?${query}`, {
+              headers: {
+                'X-BAPI-API-KEY': bybitKey,
+                'X-BAPI-TIMESTAMP': ts,
+                'X-BAPI-RECV-WINDOW': rw,
+                'X-BAPI-SIGN': sig,
+                'X-BAPI-SIGN-TYPE': '2'
+              }
+            }).then(r => r.json());
+
+            if (j.retCode === 10003) break; // wrong host
+            if (j.retCode !== 0 || !j.result?.list?.length) continue;
+
+            const acc = j.result.list[0];
+
+            // Detailed logging to debug what we're receiving
+            console.log(`[TM] Bybit ${a} balance response:`, {
+              walletBalance: acc.totalWalletBalance,
+              equity: acc.totalEquity,
+              availableBalance: acc.totalAvailableBalance,
+              accountType: a
+            });
+
+            // IMPORTANT: Only use totalWalletBalance to exclude unrealized PnL
+            balance = parseFloat(acc.totalWalletBalance || 0);
+
+            // If we can't find totalWalletBalance, fall back to coin array
+            if (!balance && Array.isArray(acc.coin)) {
+              console.log('[TM] Falling back to coin array calculation');
+              // Sum wallet balances from individual coins, excludes unrealized PnL
+              balance = acc.coin.reduce((sum, c) => sum + parseFloat(c.walletBalance || 0), 0);
+              console.log('[TM] Calculated balance from coins:', balance);
             }
-          }).then(r=>r.json());
 
-          if (j.retCode===10003) break;            // wrong host
-          if (j.retCode!==0 || !j.result?.list?.length) continue;
-
-          const acc = j.result.list[0];
-          balance = parseFloat(
-            acc.totalWalletBalance    ??  // Put this first to prioritize total balance
-            acc.totalEquity           ??  // Secondary option
-            acc.totalAvailableBalance ??  // Last option
-            0
-          );
-          if (!balance && Array.isArray(acc.coin)) {
-            balance = acc.coin.reduce((sum,c)=>sum+parseFloat(c.walletBalance||0),0);
+            if (balance) {
+              console.log(`[TM] Found Bybit balance for ${a}: ${balance}`);
+              break outer;
+            }
+          } catch (error) {
+            console.error(`[TM] Error fetching Bybit ${a} balance:`, error);
           }
-          break outer;
-        } catch {}
+        }
       }
+      return broadcast({ type: 'balanceUpdate', balance });
     }
-    return broadcast({ type:'balanceUpdate', balance });
+
+    broadcast({ type: 'balanceUpdate', balance });
   }
-
-  broadcast({ type:'balanceUpdate', balance });
-}
-
 /* ---------- Place Binance Futures Stop Loss or Take Profit ------------- */
 async function placeBinanceStopOrder(symbol, side, quantity, stopPrice, isStopLoss) {
   const { binanceKey, binanceSecret } = await getKeys();
