@@ -194,7 +194,8 @@ console.log('[TM] injected on', location.href);
         // fee estimate: maker+taker ~ 0.05% each side
         const feeRate = MK.ex === 'binance' ? 0.05 : MK.ex === 'bybit' ? 0.055 : 0;
         const totalFee = (size * entry) * (feeRate/100) * 2;
-        $('#rm-fee-val').textContent = totalFee.toFixed(4);
+        const feePercentage = riskAmt > 0 ? (totalFee / riskAmt * 100) : 0;
+        $('#rm-fee-val').textContent = `${totalFee.toFixed(4)} (${feePercentage.toFixed(2)}% of risk)`;
       }
     }
 
