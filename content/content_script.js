@@ -90,14 +90,14 @@ console.log('[TM] injected on', location.href);
         <label><input type="radio" name="mode" value="percent" checked>% bal</label>
         <label><input type="radio" name="mode" value="fixed">fixed $</label>
         <input id="risk" type="number" step="0.1" value="1">
+        <div>Balance: $<span id="bal">--</span></div>
       </div>
       <div id="tm-prices">
-        <div>Entry Price <span id="price">--</span></div>
-        <div>Balance <span id="bal">--</span></div>
+        <div>Entry Price: $<span id="price">--</span></div>
       </div>
       <div id="tm-sl-tp">
-        <label>Stop Loss <input id="sl" type="number"></label>
-        <label>Take Profit <input id="tp" type="number"></label>
+        <label>Stop Loss: <input id="sl" type="number"></label>
+        <label>Take Profit: <input id="tp" type="number"></label>
       </div>
       <div class="auto-rr-container">
         <input type="checkbox" id="auto-rr">
@@ -105,9 +105,9 @@ console.log('[TM] injected on', location.href);
         <label for="rr-target">Target RR:</label>
         <input id="rr-target" type="number" step="0.1" value="1.1">
       </div>
-      <div id="tm-fee">Est. Fee <span id="rm-fee-val">--</span></div>
-      <div id="tm-rr">RR <span id="rr">--</span></div>
-      <div id="tm-size">Size <span id="size">--</span></div>
+      <div id="tm-fee">Est. Fee: $<span id="rm-fee-val">--</span></div>
+      <div id="tm-rr">RR: <span id="rr">--</span></div>
+      <div id="tm-size">Size: <span id="size">--</span></div>
       <div id="tm-actions">
         <button id="buy">Buy</button><button id="sell">Sell</button>
       </div>
